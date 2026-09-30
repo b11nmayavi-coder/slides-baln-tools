@@ -1,0 +1,7 @@
+.wrangler/
+node_modules/
+.dev.vars
+.prod-token
+data/
+*.db
+*.db-*

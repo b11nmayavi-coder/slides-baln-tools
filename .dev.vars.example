@@ -1,0 +1,11 @@
+# Copy to .dev.vars and fill in ONE of the two AI options below.
+
+# Option A: Ollama Cloud (https://ollama.com/settings/keys)
+OLLAMA_API_KEY=
+
+# Option B: a local Ollama instead (no key needed). Uncomment, and pick a local model in Settings.
+# OLLAMA_URL=http://localhost:11434
+
+# Optional. When set, the app asks for this token before using the assistant or uploading media.
+# Leave it empty for local use; always set it on a public deployment.
+# ACCESS_TOKEN=

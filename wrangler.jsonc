@@ -1,0 +1,17 @@
+{
+  "name": "slides-baln-tools",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-28",
+  "routes": [{ "pattern": "slides.baln.tools", "custom_domain": true }],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/a/*"]
+  },
+  // Uploaded images / videos. Content-addressed, served from /a/<key> through Cloudflare's cache.
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "slides-baln-tools-media" }]
+  // Secrets (wrangler secret put):
+  //   OLLAMA_API_KEY     - Ollama Cloud key used by /api/ollama/chat
+  //   ACCESS_TOKEN       - shared token the app must send (x-slides-token) to use the proxy / upload
+}
