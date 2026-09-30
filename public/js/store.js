@@ -18,7 +18,7 @@ export const store = {
   _coalesceAt: 0,
 
   on(evt, fn) { (listeners.get(evt) || listeners.set(evt, new Set()).get(evt)).add(fn); },
-  emit(evt, data) { listeners.get(evt)?.forEach((fn) => fn(data)); },
+  emit(evt, ...data) { listeners.get(evt)?.forEach((fn) => fn(...data)); },
 
   get slide() { return this.deck.slides[this.index]; },
   el(id, slide = this.slide) { return slide?.elements.find((e) => e.id === id); },
@@ -108,8 +108,14 @@ export const store = {
   save: debounce(function () { store.persist(); }, 500),
   async persist() {
     if (!this.deck) return;
-    await db.put('decks', this.deck.id, this.deck);
-    setPref('lastDeck', this.deck.id);
+    try {
+      await db.put('decks', this.deck.id, this.deck);
+      setPref('lastDeck', this.deck.id);
+      this.emit('saved', true);
+    } catch (err) {
+      console.error(err);
+      this.emit('saved', false, err);
+    }
   },
 
   async open(deck) {
@@ -129,8 +135,5 @@ export const store = {
     await this.open(d);
     return d;
   },
-  async list() {
-    const all = await db.all('decks');
-    return all.map((d) => ({ id: d.id, title: d.title, updated: d.updated, slides: d.slides.length })).sort((a, b) => b.updated - a.updated);
-  },
+  list() { return db.listDecks(); },
 };

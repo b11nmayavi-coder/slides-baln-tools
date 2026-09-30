@@ -1,11 +1,21 @@
-# Copy to .dev.vars and fill in ONE of the two AI options below.
+# Usually you don't need to edit this by hand: `npm start` asks and writes .dev.vars for you.
+# (Re-run the questions any time with `npm run setup`.)
 
-# Option A: Ollama Cloud (https://ollama.com/settings/keys)
-OLLAMA_API_KEY=
+# --- 1) Storage (Node server only; the Cloudflare Worker uses R2 + the browser) ---
+SLIDES_STORAGE=sqlite                 # sqlite | firebase
+SLIDES_DB=data/slides.db              # SQLite file
+# FIREBASE_SERVICE_ACCOUNT=/path/to/service-account.json
+# FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
+#   …or FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY
 
-# Option B: a local Ollama instead (no key needed). Uncomment, and pick a local model in Settings.
-# OLLAMA_URL=http://localhost:11434
+# --- 2) LLM provider ---
+LLM_PROVIDER=ollama                   # ollama | gemini
+OLLAMA_API_KEY=                       # Ollama Cloud key (ollama.com/settings/keys)
+# OLLAMA_URL=http://localhost:11434   # …or a local Ollama instead of the cloud
+# OLLAMA_MODEL=kimi-k3
+# GEMINI_API_KEY=                     # aistudio.google.com/apikey
+# GEMINI_MODEL=gemini-3.8-flash
 
-# Optional. When set, the app asks for this token before using the assistant or uploading media.
-# Leave it empty for local use; always set it on a public deployment.
-# ACCESS_TOKEN=
+# --- Optional ---
+# ACCESS_TOKEN=                       # require this token for the assistant, uploads and deck storage
+# PORT=8787

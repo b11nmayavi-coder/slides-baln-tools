@@ -193,8 +193,8 @@ export const TOOLS = [
   },
 ];
 
-// Ollama Cloud models with tool calling. Ollama retires models without notice, so any tag typed in
-// Settings also works; unknown tags are assumed to support tools and vision.
+// Models offered per provider. Any other tag can be typed in Settings (providers retire models without
+// notice); unknown tags are assumed to support tools and vision.
 export const MODELS = [
   { id: 'kimi-k3', label: 'Kimi K3', vision: true, thinking: true },
   { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', vision: true, thinking: true },
@@ -206,6 +206,24 @@ export const MODELS = [
   { id: 'gpt-oss:120b', label: 'gpt-oss 120B', vision: false, thinking: true },
 ];
 
-export function modelInfo(id) {
-  return MODELS.find((m) => m.id === id) || { id: id || MODELS[0].id, label: id || MODELS[0].label, vision: true, thinking: true };
+export const GEMINI_MODELS = [
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', vision: true, thinking: true },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)', vision: true, thinking: true },
+  { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', vision: true, thinking: true },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', vision: true, thinking: true },
+];
+
+export const modelsFor = (provider) => (provider === 'gemini' ? GEMINI_MODELS : MODELS);
+
+// The model to use: the user's pick if it belongs to the active provider, else the server's default.
+export function activeModel(settings, server) {
+  const provider = server.provider || 'ollama';
+  const id = settings.model;
+  const fits = id && (provider === 'gemini') === /^gemini/.test(id);
+  return fits ? id : server.defaultModel || modelsFor(provider)[0].id;
+}
+
+export function modelInfo(id, provider = 'ollama') {
+  const list = modelsFor(provider);
+  return list.find((m) => m.id === id) || { id: id || list[0].id, label: id || list[0].label, vision: true, thinking: true };
 }

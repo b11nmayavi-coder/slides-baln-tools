@@ -1,5 +1,5 @@
 const KEY = 'slides.settings';
-const defaults = { accessToken: '', model: 'kimi-k3', effort: 'high' };
+const defaults = { accessToken: '', model: '', effort: 'high' };
 
 function load() {
   let s;
@@ -16,7 +16,7 @@ export function saveSettings(patch) {
   try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch {}
 }
 
-export const server = { ai: false, uploads: false, auth: true, checked: false };
+export const server = { ai: false, provider: 'ollama', defaultModel: '', uploads: false, storage: null, auth: true, checked: false };
 
 export async function checkServer() {
   try {

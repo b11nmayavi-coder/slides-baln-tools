@@ -1,5 +1,5 @@
 import { store } from './store.js';
-import { db } from './db.js';
+import { db, useRemoteStorage, migrateLocalToServer } from './db.js';
 import { Editor } from './editor.js';
 import { Toolbar, pickFile } from './toolbar.js';
 import { Filmstrip } from './filmstrip.js';
@@ -7,7 +7,7 @@ import { Presenter } from './present.js';
 import { AnimPanel } from './animpanel.js';
 import { Assistant } from './ai.js';
 import { SlideView, invalidateAll } from './render.js';
-import { checkServer, pref, setPref } from './settings.js';
+import { checkServer, server, pref, setPref } from './settings.js';
 import { openSettings, applyUITheme } from './settingsModal.js';
 import { newDeck, newSlide, newElement } from './model.js';
 import { PRESETS } from './anim/presets.js';
@@ -76,12 +76,14 @@ store.on('deck-title', syncTitle);
 store.on('change', syncTitle);
 
 // Save indicator
-let saveT;
 store.on('change', (k) => {
   if (k === 'live') return;
   $('saveState').textContent = 'Saving…';
-  clearTimeout(saveT);
-  saveT = setTimeout(() => { $('saveState').textContent = 'Saved'; }, 900);
+});
+store.on('saved', (ok, err) => {
+  $('saveState').textContent = ok ? (server.storage ? `Saved to ${server.storage === 'sqlite' ? 'SQLite' : 'Firebase'}` : 'Saved') : 'Not saved';
+  $('saveState').title = ok ? '' : String(err?.message || err || '');
+  if (!ok) toast('Could not save: ' + (err?.message || err));
 });
 
 // Notes
@@ -270,7 +272,20 @@ function starterDeck() {
 
 // ---------- boot ----------
 (async () => {
-  checkServer().then(() => assistant.updateNote());
+  await checkServer();
+  assistant.updateNote();
+  if (server.storage) {
+    useRemoteStorage(true);
+    try {
+      const n = await migrateLocalToServer();
+      if (n) toast(`Moved ${n} deck${n > 1 ? 's' : ''} from this browser to ${server.storage === 'sqlite' ? 'SQLite' : 'Firebase'}`);
+    } catch (err) {
+      // Most likely the access token is missing: fall back to browser storage for this session.
+      console.warn(err);
+      useRemoteStorage(false);
+      toast('Server storage unavailable (' + err.message + '). Using this browser for now.', 5000);
+    }
+  }
   const last = pref('lastDeck', null);
   let deck = last ? await db.get('decks', last) : null;
   if (!deck) {

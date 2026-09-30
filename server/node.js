@@ -1,62 +1,16 @@
-// Plain Node server: no Cloudflare needed. Serves ./public, proxies Ollama, and stores uploaded
-// images/videos in a local SQLite file (Node's built-in node:sqlite, Node 22.5+).
-//
-//   npm start                      -> http://localhost:8787
-//   PORT=3000 SLIDES_DB=./my.db npm start
-//
-// Configuration is read from environment variables, or from .dev.vars / .env in the project root.
+// Plain Node server (no Cloudflare): serves ./public, proxies the LLM, and keeps decks, chats and
+// uploaded media in SQLite or Firebase. Started by server/start.js, which handles configuration.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../src/app.js';
+import { llmInfo } from '../src/llm.js';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
 
-for (const f of ['.dev.vars', '.env']) {
-  const p = path.join(ROOT, f);
-  if (fs.existsSync(p)) process.loadEnvFile(p);
-}
-const env = process.env;
-const PORT = Number(env.PORT) || 8787;
-const DB_PATH = path.resolve(ROOT, env.SLIDES_DB || 'data/slides.db');
-
-// ---------- SQLite media storage ----------
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new DatabaseSync(DB_PATH);
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  CREATE TABLE IF NOT EXISTS media (
-    key     TEXT PRIMARY KEY,
-    type    TEXT NOT NULL,
-    size    INTEGER NOT NULL,
-    data    BLOB NOT NULL,
-    created INTEGER NOT NULL
-  );
-`);
-const qHead = db.prepare('SELECT type, size FROM media WHERE key = ?');
-const qAll = db.prepare('SELECT data FROM media WHERE key = ?');
-const qPart = db.prepare('SELECT substr(data, ?, ?) AS data FROM media WHERE key = ?'); // 1-based offset
-const qPut = db.prepare('INSERT OR IGNORE INTO media (key, type, size, data, created) VALUES (?, ?, ?, ?, ?)');
-
-const sqliteMedia = {
-  head(key) {
-    const r = qHead.get(key);
-    return r ? { size: r.size, type: r.type, etag: `"${key.split('.')[0]}"` } : null;
-  },
-  get(key, range) {
-    const r = range ? qPart.get(range.offset + 1, range.length, key) : qAll.get(key);
-    return r ? new Uint8Array(r.data) : null;
-  },
-  put(key, bytes, type) {
-    qPut.run(key, type, bytes.byteLength, new Uint8Array(bytes), Date.now());
-  },
-};
-
-// ---------- static files ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -81,35 +35,55 @@ async function assets(req) {
   }
 }
 
-// ---------- HTTP bridge (node:http <-> fetch Request/Response) ----------
-const handle = createApp({ env, media: sqliteMedia, assets });
-
-const server = http.createServer(async (req, res) => {
-  try {
-    const url = `http://${req.headers.host || 'localhost'}${req.url}`;
-    const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
-    const request = new Request(url, {
-      method: req.method,
-      headers: Object.entries(req.headers).flatMap(([k, v]) => (Array.isArray(v) ? v.map((x) => [k, x]) : [[k, v]])),
-      body: hasBody ? Readable.toWeb(req) : undefined,
-      duplex: hasBody ? 'half' : undefined,
-    });
-    const response = await handle(request);
-    res.writeHead(response.status, Object.fromEntries(response.headers));
-    if (!response.body) return res.end();
-    Readable.fromWeb(response.body).on('error', () => res.destroy()).pipe(res);
-  } catch (err) {
-    res.writeHead(500, { 'content-type': 'text/plain' });
-    res.end(String(err?.stack || err));
+async function openStorage(env) {
+  if (env.SLIDES_STORAGE === 'firebase') {
+    const { createFirebase } = await import('./storage/firebase.js');
+    return createFirebase(env);
   }
-});
+  const { createSqlite } = await import('./storage/sqlite.js');
+  return createSqlite(path.resolve(ROOT, env.SLIDES_DB || 'data/slides.db'));
+}
 
-server.listen(PORT, () => {
-  const ai = env.OLLAMA_URL ? `local Ollama at ${env.OLLAMA_URL}` : env.OLLAMA_API_KEY ? 'Ollama Cloud' : 'not configured (set OLLAMA_API_KEY or OLLAMA_URL)';
-  console.log(`Slides running at http://localhost:${PORT}`);
-  console.log(`  media: SQLite ${path.relative(ROOT, DB_PATH)}`);
-  console.log(`  AI:    ${ai}`);
-  console.log(`  auth:  ${env.ACCESS_TOKEN ? 'ACCESS_TOKEN required' : 'open (no ACCESS_TOKEN set)'}`);
-});
+export async function startServer(env) {
+  const storage = await openStorage(env);
+  const handle = createApp({ env, media: storage.media, store: storage.store, assets });
+  const port = Number(env.PORT) || 8787;
 
-process.on('SIGINT', () => { db.close(); process.exit(0); });
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = `http://${req.headers.host || 'localhost'}${req.url}`;
+      const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+      const request = new Request(url, {
+        method: req.method,
+        headers: Object.entries(req.headers).flatMap(([k, v]) => (Array.isArray(v) ? v.map((x) => [k, x]) : [[k, v]])),
+        body: hasBody ? Readable.toWeb(req) : undefined,
+        duplex: hasBody ? 'half' : undefined,
+      });
+      const response = await handle(request);
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      if (!response.body) return res.end();
+      Readable.fromWeb(response.body).on('error', () => res.destroy()).pipe(res);
+    } catch (err) {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end(String(err?.stack || err));
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, resolve);
+  });
+
+  const llm = llmInfo(env);
+  const ai = !llm.configured ? `not configured (${llm.problem})`
+    : llm.provider === 'gemini' ? `Gemini · ${llm.model}`
+    : env.OLLAMA_URL ? `local Ollama at ${env.OLLAMA_URL} · ${llm.model}` : `Ollama Cloud · ${llm.model}`;
+  console.log(`\n  Slides running at http://localhost:${port}\n`);
+  console.log(`  storage  ${storage.describe}`);
+  console.log(`  AI       ${ai}`);
+  console.log(`  auth     ${env.ACCESS_TOKEN ? 'ACCESS_TOKEN required' : 'open (no ACCESS_TOKEN set)'}`);
+  console.log(`\n  Change these answers any time with: npm run setup\n`);
+
+  process.on('SIGINT', () => { storage.close(); process.exit(0); });
+  return server;
+}

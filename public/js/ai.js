@@ -4,7 +4,7 @@
 import { store } from './store.js';
 import { db } from './db.js';
 import { settings, saveSettings, server } from './settings.js';
-import { SYSTEM, TOOLS, MODELS, modelInfo } from './prompt.js';
+import { SYSTEM, TOOLS, modelsFor, modelInfo, activeModel } from './prompt.js';
 import { sanitizeHTML } from './sanitize.js';
 import { newElement, newSlide, FONTS, SHAPES, color as themeColor } from './model.js';
 import { h, clone, uid, esc, readAsDataURL, toast } from './util.js';
@@ -13,7 +13,7 @@ import { paramValues } from './anim/host.js';
 import { openSettings } from './settingsModal.js';
 import { pickFile } from './toolbar.js';
 
-const CHAT_VERSION = 2; // Ollama message format
+const CHAT_VERSION = 2; // Ollama message format (+ gemini_parts on assistant turns when using Gemini)
 const OLLAMA_TOOLS = TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
 const SUGGESTIONS = [
@@ -45,7 +45,7 @@ export class Assistant {
   // ---------- UI ----------
   build() {
     this.orb = h('span', { class: 'ai-orb' });
-    const modelSel = h('select', { class: 'tb-select', title: 'Model (Ollama Cloud)', style: { fontSize: '11.5px', color: 'var(--text-2)', maxWidth: '150px' } });
+    const modelSel = h('select', { class: 'tb-select', title: 'Model', style: { fontSize: '11.5px', color: 'var(--text-2)', maxWidth: '150px' } });
     modelSel.onchange = () => saveSettings({ model: modelSel.value });
     this.modelSel = modelSel;
     const head = h('div', { class: 'ai-head' },
@@ -82,14 +82,17 @@ export class Assistant {
   }
 
   updateNote() {
-    const opts = [...MODELS];
-    if (!opts.some((m) => m.id === settings.model)) opts.push({ id: settings.model, label: settings.model });
-    this.modelSel.replaceChildren(...opts.map((m) => h('option', { value: m.id, selected: m.id === settings.model }, m.label)));
-    const m = modelInfo(settings.model);
+    const provider = server.provider || 'ollama';
+    const current = activeModel(settings, server);
+    const opts = [...modelsFor(provider)];
+    if (!opts.some((m) => m.id === current)) opts.push({ id: current, label: current });
+    this.modelSel.replaceChildren(...opts.map((m) => h('option', { value: m.id, selected: m.id === current }, m.label)));
+    const m = modelInfo(current, provider);
+    const name = provider === 'gemini' ? 'Gemini' : 'Ollama';
     this.note.textContent = !server.ai
-      ? (server.checked ? 'The server has no OLLAMA_API_KEY or OLLAMA_URL yet — see README.' : '')
+      ? (server.checked ? `The server has no ${provider === 'gemini' ? 'GEMINI_API_KEY' : 'OLLAMA_API_KEY or OLLAMA_URL'} yet — run \`npm run setup\`.` : '')
       : server.auth && !settings.accessToken ? 'Add the access token in settings to start.'
-      : m.vision ? `Ollama · ${m.label}` : `Ollama · ${m.label} (no vision: it can’t see screenshots or images)`;
+      : m.vision ? `${name} · ${m.label}` : `${name} · ${m.label} (no vision: it can’t see screenshots or images)`;
   }
 
   autosize() { this.ta.style.height = 'auto'; this.ta.style.height = Math.min(200, this.ta.scrollHeight) + 'px'; }
@@ -158,7 +161,7 @@ export class Assistant {
     this.renderCtx();
     this.updateNote();
   }
-  saveChat() { if (this.deckId) db.put('chats', this.deckId, { v: CHAT_VERSION, history: this.history, updated: Date.now() }); }
+  saveChat() { if (this.deckId) db.put('chats', this.deckId, { v: CHAT_VERSION, history: this.history, updated: Date.now() }).catch((e) => console.warn('chat not saved', e)); }
   newChat() {
     this.stop();
     this.history = [];
@@ -258,6 +261,7 @@ export class Assistant {
       if (m.tool_calls) w.tool_calls = m.tool_calls;
       if (m.tool_name) w.tool_name = m.tool_name;
       if (m.thinking) w.thinking = m.thinking;
+      if (m.gemini_parts) w.gemini_parts = m.gemini_parts;
       out.push(w);
     }
     return out;
@@ -269,9 +273,12 @@ export class Assistant {
     try {
       for (let turn = 0; turn < 24; turn++) {
         if (abort.signal.aborted) break;
-        const model = modelInfo(settings.model);
+        const provider = server.provider || 'ollama';
+        const model = modelInfo(activeModel(settings, server), provider);
         const body = { model: model.id, messages: this.wireMessages(model.vision), tools: OLLAMA_TOOLS, stream: true };
-        if (model.thinking) body.think = model.id.startsWith('gpt-oss') ? (settings.effort === 'low' ? 'low' : settings.effort === 'medium' ? 'medium' : 'high') : settings.effort !== 'low';
+        const effort = settings.effort || 'high';
+        if (provider === 'gemini' || model.id.startsWith('gpt-oss')) body.think = effort;
+        else if (model.thinking) body.think = effort !== 'low';
 
         const ui = this.streamUI();
         let msg;
@@ -287,6 +294,7 @@ export class Assistant {
         const entry = { role: 'assistant', content: msg.content || '' };
         if (msg.thinking) entry.thinking = msg.thinking;
         if (calls.length) entry.tool_calls = calls;
+        if (msg.gemini_parts?.length) entry.gemini_parts = msg.gemini_parts; // replayed verbatim (thought signatures)
         this.history.push(entry);
         this.saveChat();
         if (!calls.length) {
@@ -329,7 +337,7 @@ export class Assistant {
 
   // POST to the Worker proxy and read Ollama's NDJSON stream. Returns the assembled assistant message.
   async chat(body, signal, ui) {
-    const res = await fetch('/api/ollama/chat', {
+    const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-slides-token': settings.accessToken || '' },
       body: JSON.stringify(body),
@@ -341,7 +349,7 @@ export class Assistant {
       try { const j = JSON.parse(raw); msg = j.error?.message || j.error || raw; } catch {}
       throw new ApiError(res.status, String(msg).slice(0, 400));
     }
-    const out = { content: '', thinking: '', tool_calls: [], done_reason: null };
+    const out = { content: '', thinking: '', tool_calls: [], done_reason: null, gemini_parts: null };
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = '';
     for (;;) {
@@ -360,6 +368,7 @@ export class Assistant {
         if (m.thinking) { out.thinking += m.thinking; ui.thinking(out.thinking); }
         if (m.content) { out.content += m.content; ui.text(out.content); }
         if (m.tool_calls?.length) { out.tool_calls.push(...m.tool_calls); ui.tools(out.tool_calls); }
+        if (m.gemini_parts) out.gemini_parts = m.gemini_parts;
         if (chunk.done) out.done_reason = chunk.done_reason;
       }
     }
@@ -792,9 +801,9 @@ function parseArgs(a) {
 function describeError(err) {
   const status = err?.status;
   const msg = err?.message || String(err);
-  if (status === 401) return /token/i.test(msg) ? 'Wrong access token — check Settings.' : `Ollama rejected the API key: ${msg}`;
-  if (status === 404) return `Model not found on Ollama Cloud (it may have been retired). Pick another model. ${msg}`;
-  if (status === 429) return 'Ollama Cloud rate limit or usage cap reached. Wait a bit and try again.';
+  if (status === 401) return /token/i.test(msg) ? 'Wrong access token — check Settings.' : `The provider rejected the API key: ${msg}`;
+  if (status === 404) return `Model not found (it may have been retired). Pick another model. ${msg}`;
+  if (status === 429) return 'Rate limit or usage cap reached. Wait a bit and try again.';
   if (status === 503) return msg;
   if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return 'Network error — could not reach the server.';
   return status ? `Error ${status}: ${msg}` : msg;

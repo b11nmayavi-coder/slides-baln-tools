@@ -3,28 +3,31 @@
 //   server/node.js    plain Node server, media in SQLite
 //
 // Routes:
-//   /api/status         what the server offers
-//   /api/ollama/chat    Ollama chat proxy (Ollama Cloud by default, or OLLAMA_URL); the key stays server-side
-//   /api/assets         PUT an image/video (content-addressed)
-//   /a/<key>            public, immutable media (supports range requests for video seeking)
-// The chat proxy and uploads are gated by ACCESS_TOKEN when it is set (always set it on a public deployment).
+//   /api/status               what the server offers
+//   /api/chat                 LLM proxy in Ollama's /api/chat format (see src/llm.js; Ollama or Gemini)
+//   /api/assets               PUT an image/video (content-addressed)
+//   /a/<key>                  public, immutable media (supports range requests for video seeking)
+//   /api/decks[/<id>]         deck storage (only when a `store` adapter is configured, e.g. SQLite/Firebase)
+//   /api/chats/<id>           assistant history per deck (same)
+// Everything except /a/<key> and static files is gated by ACCESS_TOKEN when it is set.
 //
-// `media` is a small storage adapter:
-//   head(key)                   -> { size, type, etag } | null
-//   get(key, { offset, length}) -> body (ReadableStream | Uint8Array); range optional
-//   put(key, bytes, type)       -> void
+// `media` adapter:  head(key) -> {size, type, etag} | null · get(key, {offset, length}?) -> body · put(key, bytes, type)
+// `store` adapter:  name · listDecks() -> [{id, title, updated, slides}] · getDeck(id) · putDeck(id, deck) · deleteDeck(id)
+//                   getChat(id) · putChat(id, chat) · deleteChat(id)      (all may be async; missing -> null)
+import { chat, llmInfo } from './llm.js';
 
 const MAX_UPLOAD = 100 * 1024 * 1024;
 const ALLOWED_MEDIA = /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|video\/(mp4|webm|quicktime))$/;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-export function createApp({ env, media, assets, cache = null }) {
+export function createApp({ env, media, assets, cache = null, store = null }) {
   return async function handle(req, waitUntil = () => {}) {
     const url = new URL(req.url);
     try {
-      if (url.pathname === '/api/status') return status(env, media);
-      if (url.pathname === '/api/ollama/chat') return await proxyOllama(req, env);
+      if (url.pathname === '/api/status') return status(env, media, store);
+      if (url.pathname === '/api/chat') return await proxyChat(req, env);
       if (url.pathname === '/api/assets') return await upload(req, env, media);
+      if (url.pathname === '/api/decks' || url.pathname.startsWith('/api/decks/') || url.pathname.startsWith('/api/chats/')) return await storage(req, env, url, store);
       if (url.pathname.startsWith('/a/')) return await serveMedia(req, url, media, cache, waitUntil);
     } catch (err) {
       return json({ error: { type: 'server_error', message: String((err && err.message) || err) } }, 500);
@@ -50,33 +53,58 @@ function authorized(req, env) {
   return diff === 0;
 }
 
-function status(env, media) {
+function status(env, media, store) {
+  const llm = llmInfo(env);
   return json({
-    ai: Boolean(env.OLLAMA_API_KEY || env.OLLAMA_URL),
+    ai: llm.configured,
+    provider: llm.provider,
+    defaultModel: llm.model,
     uploads: Boolean(media),
+    storage: store ? store.name : null,
     auth: Boolean(env.ACCESS_TOKEN),
   });
 }
 
-async function proxyOllama(req, env) {
+async function proxyChat(req, env) {
   if (req.method !== 'POST') return json({ error: { type: 'method_not_allowed' } }, 405);
-  if (!env.OLLAMA_API_KEY && !env.OLLAMA_URL) return json({ error: { type: 'ai_disabled', message: 'The server has no OLLAMA_API_KEY (or OLLAMA_URL) configured.' } }, 503);
+  const llm = llmInfo(env);
+  if (!llm.configured) return json({ error: { type: 'ai_disabled', message: llm.problem } }, 503);
   if (!authorized(req, env)) return json({ error: { type: 'authentication_error', message: 'Missing or wrong access token (Settings → Access token).' } }, 401);
+  let body;
+  try { body = await req.json(); } catch { return json({ error: { type: 'bad_request', message: 'Body must be JSON' } }, 400); }
+  return chat(env, body);
+}
 
-  const base = (env.OLLAMA_URL || 'https://ollama.com').replace(/\/+$/, '');
-  const headers = { 'content-type': 'application/json' };
-  if (env.OLLAMA_API_KEY) headers.authorization = `Bearer ${env.OLLAMA_API_KEY}`;
-  let upstream;
-  try {
-    upstream = await fetch(base + '/api/chat', { method: 'POST', headers, body: await req.text() });
-  } catch (err) {
-    return json({ error: { type: 'upstream_unreachable', message: `Could not reach Ollama at ${base}: ${err.message}` } }, 502);
+const MAX_JSON = 60 * 1024 * 1024;
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+async function storage(req, env, url, store) {
+  if (!store) return json({ error: { type: 'storage_disabled', message: 'This server keeps decks in the browser.' } }, 404);
+  if (!authorized(req, env)) return json({ error: { type: 'authentication_error', message: 'Missing or wrong access token (Settings → Access token).' } }, 401);
+  const [, , kind, id] = url.pathname.split('/'); // ['', 'api', 'decks'|'chats', id?]
+  if (kind === 'decks' && !id) {
+    if (req.method !== 'GET') return json({ error: { type: 'method_not_allowed' } }, 405);
+    return json(await store.listDecks());
   }
-  // Stream NDJSON straight through; surface upstream errors verbatim (a retired model fails here).
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: { 'content-type': upstream.headers.get('content-type') || 'application/x-ndjson', 'cache-control': 'no-store' },
-  });
+  if (!ID.test(id || '')) return json({ error: { type: 'bad_id' } }, 400);
+  const ops = kind === 'decks'
+    ? { get: (i) => store.getDeck(i), put: (i, v) => store.putDeck(i, v), del: (i) => store.deleteDeck(i) }
+    : { get: (i) => store.getChat(i), put: (i, v) => store.putChat(i, v), del: (i) => store.deleteChat(i) };
+  if (req.method === 'GET') {
+    const v = await ops.get(id);
+    return v == null ? json({ error: { type: 'not_found' } }, 404) : json(v);
+  }
+  if (req.method === 'PUT') {
+    const text = await req.text();
+    if (text.length > MAX_JSON) return json({ error: { type: 'too_large' } }, 413);
+    let v;
+    try { v = JSON.parse(text); } catch { return json({ error: { type: 'bad_request', message: 'Body must be JSON' } }, 400); }
+    if (kind === 'decks' && (!v || v.id !== id || !Array.isArray(v.slides))) return json({ error: { type: 'bad_request', message: 'Not a deck' } }, 400);
+    await ops.put(id, v);
+    return json({ ok: true });
+  }
+  if (req.method === 'DELETE') { await ops.del(id); return json({ ok: true }); }
+  return json({ error: { type: 'method_not_allowed' } }, 405);
 }
 
 async function upload(req, env, media) {

@@ -14,78 +14,75 @@ Live: **https://slides.baln.tools**
 
 ## Run it locally
 
-You need **Node.js 22.5 or newer** and an AI model from one of:
-
-- **Ollama Cloud**: an API key from [ollama.com/settings/keys](https://ollama.com/settings/keys), or
-- **Ollama on your machine** ([download](https://ollama.com/download)): no key needed. Use a model with tool
-  support, ideally vision too.
-
-### 1. Get the code and configure it
+You need **Node.js 22.5 or newer**.
 
 ```sh
 git clone https://github.com/b11nmayavi-coder/slides-baln-tools.git
 cd slides-baln-tools
 npm install
-cp .dev.vars.example .dev.vars
-```
-
-Edit `.dev.vars` and set one of these:
-
-```sh
-OLLAMA_API_KEY=your-ollama-cloud-key        # Ollama Cloud
-# OLLAMA_URL=http://localhost:11434         # …or a local Ollama
-```
-
-### 2. Start it: pick a backend
-
-**Option A: plain Node + SQLite (no Cloudflare)**
-
-```sh
 npm start
 ```
 
-This is a small Node server (`server/node.js`). Uploaded images and videos are stored in a local SQLite file,
-`data/slides.db`, using Node's built-in `node:sqlite`, so there's nothing else to install. Set `SLIDES_DB` to put
-the file somewhere else, and `PORT` to change the port.
+The first `npm start` asks two questions, checks your answers, saves them to `.dev.vars`, and starts the app at
+**http://localhost:8787**:
 
-**Option B: Cloudflare Worker, simulated locally**
+```
+1) Where should decks and uploaded media be stored?
+  1) SQLite    a single local file, nothing to set up
+  2) Firebase  Firestore + Cloud Storage in your Firebase project
 
-```sh
-npm run dev
+2) Which LLM provider should the assistant use?
+  1) Ollama    Ollama Cloud or Ollama running on this machine
+  2) Gemini    Google Gemini API key from aistudio.google.com
 ```
 
-This runs the same code as production through Wrangler, with R2 storage simulated on disk. No Cloudflare
-account is needed to run it locally.
+Run `npm run setup` any time to change the answers.
 
-Either way, open **http://localhost:8787**.
+### Storage options
 
-Decks and chat history are saved in your browser (IndexedDB). Use the deck menu (top-left) to export or import
-decks as JSON files; uploaded media is embedded when you export.
-
-### Choosing a model
-
-Pick a model in the assistant header, or type any Ollama model tag in **Settings**.
-
-| Model (Ollama Cloud) | Tools | Vision |
+| | What you need | Where things go |
 |---|---|---|
-| `kimi-k3` (default) | ✓ | ✓ |
-| `kimi-k2.7-code`, `minimax-m3`, `gemma4:31b`, `mistral-large-3:675b` | ✓ | ✓ |
+| **SQLite** | nothing | one file, `data/slides.db` by default: decks, chats and uploaded images/videos |
+| **Firebase** | a Firebase project with **Firestore** and **Storage** enabled, and a service-account key (Firebase console → Project settings → Service accounts → Generate new private key) | deck index in the Firestore collection `slides_decks`; decks, chats and media under `slides/` in Cloud Storage |
+
+Decks you already made in the browser are moved to the database the first time you open the app.
+
+### LLM options
+
+| | What you need | Default model |
+|---|---|---|
+| **Ollama Cloud** | an API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) | `kimi-k3` |
+| **Ollama on your machine** | [Ollama](https://ollama.com/download) running, with a model that supports tools (setup lists the ones you have and shows which support vision) | your pick |
+| **Gemini** | an API key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `gemini-3.8-flash` |
+
+You can switch models later in the assistant header or in **Settings**. Vision matters: after writing an
+animation, the model gets a screenshot of it running and uses it to fix what looks wrong.
+
+| Ollama Cloud models | Tools | Vision |
+|---|---|---|
+| `kimi-k3`, `kimi-k2.7-code`, `minimax-m3`, `gemma4:31b`, `mistral-large-3:675b` | ✓ | ✓ |
 | `glm-5.3`, `deepseek-v4-pro:0813`, `gpt-oss:120b` | ✓ | – |
 
-Vision matters: after writing an animation, the model gets a screenshot of it running and uses it to fix what
-looks wrong. With a local Ollama, check a model's capabilities with `ollama show <model>`. It needs `tools`,
-and ideally `vision`.
+Gemini options: `gemini-3.8-flash` (default), `gemini-3.1-pro-preview`, `gemini-3.7-flash`,
+`gemini-3.5-flash-lite`.
+
+### Running the Cloudflare version locally instead
+
+`npm run dev` runs the production Cloudflare Worker through Wrangler (R2 simulated on disk, decks kept in the
+browser). It reads the same `.dev.vars`; no Cloudflare account is needed to run it locally.
 
 ### Troubleshooting
 
 - **"WebGL2 is unavailable"**: shader animations need WebGL2. Turn on hardware acceleration in your browser
   (Chrome: `chrome://settings/system`). Canvas 2D animations work either way, and the assistant is told which
   one your browser supports.
-- **"The server has no OLLAMA_API_KEY or OLLAMA_URL"**: `.dev.vars` is missing or empty. Restart the server after
-  editing it.
-- **"Model not found"**: Ollama retires cloud models. Pick another in Settings.
-- **The app asks for an access token**: `ACCESS_TOKEN` is set in `.dev.vars`. Remove it for local use, or enter the
-  same value in Settings.
+- **"Model not found"**: providers retire models. Pick another in Settings, or run `npm run setup`.
+- **Firebase: bucket not found / permission denied**: enable Firestore and Storage in the Firebase console, and
+  check the bucket name (newer projects use `<project-id>.firebasestorage.app`, older ones `<project-id>.appspot.com`).
+- **The app asks for an access token**: `ACCESS_TOKEN` is set in `.dev.vars`. Remove it for local use, or enter
+  the same value in Settings.
+- **`npm start` exits with "needs a one-time setup"**: the questions need a real terminal. Run `npm run setup` in one,
+  or fill in `.dev.vars` by hand (see `.dev.vars.example`).
 
 ## How animations work
 
@@ -117,9 +114,12 @@ work. Every AI change is a normal undo step.
 ## Project layout
 
 ```
-src/app.js             request handling shared by both backends (Ollama proxy, uploads, media, ranges)
+src/app.js             request handling shared by both runtimes (chat proxy, uploads, media, deck storage)
+src/llm.js             LLM providers: Ollama passthrough, Gemini translation
 src/worker.js          Cloudflare Worker entry: static assets + media in R2
-server/node.js         Node entry: static files + media in SQLite
+server/start.js        `npm start` / `npm run setup`: the setup questions, then the Node server
+server/node.js         Node HTTP server
+server/storage/        sqlite.js (node:sqlite) and firebase.js (Firestore + Cloud Storage)
 public/index.html
 public/css/app.css
 public/js/
@@ -137,12 +137,12 @@ public/js/
 ```
 
 The front end has no build step: plain ES modules served as static files. To add another storage backend,
-implement the three-method `media` adapter described at the top of `src/app.js` (`head`, `get`, `put`).
+implement the `media` and `store` adapters described at the top of `src/app.js`.
 
 ## Deploy
 
-**Anywhere Node runs** (a VM, Fly.io, Railway, a home server): `npm start` behind a reverse proxy. Keep
-`data/slides.db` on persistent storage.
+**Anywhere Node runs** (a VM, Fly.io, Railway, a home server): run `npm run setup` once, then `npm start` behind a
+reverse proxy, with `ACCESS_TOKEN` set. With SQLite, keep `data/slides.db` on persistent storage.
 
 **Cloudflare Workers:**
 
@@ -153,7 +153,7 @@ implement the three-method `media` adapter described at the top of `src/app.js` 
 ```sh
 npx wrangler login
 npx wrangler r2 bucket create slides-baln-tools-media
-npx wrangler secret put OLLAMA_API_KEY
+npx wrangler secret put OLLAMA_API_KEY      # or GEMINI_API_KEY, plus: npx wrangler secret put LLM_PROVIDER (gemini)
 npx wrangler secret put ACCESS_TOKEN     # any long random string; you'll enter it in Settings
 npm run deploy
 ```
